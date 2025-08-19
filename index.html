@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Camera + Continuous Voice Chat (Improved)</title>
+<style>
+  body {
+    font-family: Helvetica, Arial, sans-serif;
+    max-width: 640px;
+    margin: 30px auto;
+    background: #fafafa;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+  }
+  video {
+    width: 100%;
+    height: auto;
+    border-radius: 12px;
+    background: #000;
+  }
+  button {
+    padding: 12px 20px;
+    margin: 5px 8px 15px 0;
+    font-size: 16px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+  }
+  #startCamBtn { background: #007bff; color: #fff; }
+  #stopCamBtn { background: #dc3545; color: #fff; }
+  #startRecBtn { background: #28a745; color: #fff; }
+  #stopRecBtn { background: #ffc107; color: #000; }
+
+  #transcript, #response {
+    margin-top: 15px;
+    min-height: 50px;
+    padding: 12px;
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: inset 0 0 5px rgba(0,0,0,0.1);
+    font-size: 16px;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+
+<h2>Camera + Continuous Voice Chat (Improved)</h2>
+<video id="camera" autoplay muted playsinline></video>
+<div style="margin-top: 15px;">
+  <button id="startCamBtn">Start Camera</button>
+  <button id="stopCamBtn" disabled>Stop Camera</button>
+</div>
+<div style="margin-top: 20px;">
+  <button id="startRecBtn">Start Listening</button>
+  <button id="stopRecBtn" disabled>Stop Listening</button>
+</div>
+
+<h3>Your Speech:</h3>
+<div id="transcript">--</div>
+
+<h3>AI Response:</h3>
+<div id="response">Waiting to start...</div>
+
+<script>
+  const video = document.getElementById('camera');
+  const startCamBtn = document.getElementById('startCamBtn');
+  const stopCamBtn = document.getElementById('stopCamBtn');
+  const startRecBtn = document.getElementById('startRecBtn');
+  const stopRecBtn = document.getElementById('stopRecBtn');
+  const transcriptDiv = document.getElementById('transcript');
+  const responseDiv = document.getElementById('response');
+
+  let cameraStream = null;
+  let recognition = null;
+  let isListening = false;
+  const history = [];
+
+  // Camera controls
+  startCamBtn.onclick = async () => {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+      video.srcObject = cameraStream;
+      startCamBtn.disabled = true;
+      stopCamBtn.disabled = false;
+    } catch(e) {
+      alert("Could not access camera: " + e.message);
+    }
+  };
+  stopCamBtn.onclick = () => {
+    if(cameraStream) {
+      cameraStream.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+      startCamBtn.disabled = false;
+      stopCamBtn.disabled = true;
+    }
+  };
+
+  // Speech Recognition setup
+  if (!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
+    alert('Speech Recognition API not supported. Use Chrome or Edge.');
+  } else {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = true; // Keep recognition active continuously
+
+    recognition.onstart = () => {
+      isListening = true;
+      transcriptDiv.textContent = "Listening...";
+      startRecBtn.disabled = true;
+      stopRecBtn.disabled = false;
+    };
+
+    recognition.onend = () => {
+      isListening = false;
+      transcriptDiv.textContent = "Recognition stopped. Restarting...";
+      // Automatically restart recognition unless user stopped it
+      if (stopRecBtn.disabled === false) {
+        recognition.start();
+      } else {
+        startRecBtn.disabled = false;
+        stopRecBtn.disabled = true;
+      }
+    };
+
+    recognition.onerror = (e) => {
+      transcriptDiv.textContent = "Error: " + e.error;
+      console.error('SpeechRecognition error:', e.error);
+      if(e.error === 'not-allowed' || e.error === 'service-not-allowed'){
+        startRecBtn.disabled = false;
+        stopRecBtn.disabled = true;
+      }
+    };
+
+    recognition.onresult = (event) => {
+      const speech = event.results[event.resultIndex][0].transcript.trim();
+      transcriptDiv.textContent = speech;
+      // Send only when result is final and confidence good
+      // Prevent flooding backend with repeated results by checking isListening 
+      if (isListening) {
+        sendToBackend(speech);
+      }
+    };
+  }
+
+  // Start Listening
+  startRecBtn.onclick = () => {
+    if(recognition && !isListening) {
+      recognition.start();
+    }
+  };
+  // Stop Listening
+  stopRecBtn.onclick = () => {
+    if(recognition && isListening) {
+      recognition.stop();
+      isListening = false;
+      startRecBtn.disabled = false;
+      stopRecBtn.disabled = true;
+    }
+  };
+
+  // Send speech text to backend and handle AI response
+  async function sendToBackend(text) {
+    // To prevent overlapping sends, disable recognition temporarily
+    recognition.pause && recognition.pause(); // split browsers may or may not support
+    responseDiv.textContent = "Thinking...";
+    try {
+      const res = await fetch("http://localhost:8000/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({message: text, history: history})
+      });
+      if(!res.ok) throw new Error("Network error");
+      const data = await res.json();
+      responseDiv.textContent = data.reply;
+      history.push({question: text, answer: data.reply});
+      speakAnswer(data.reply);
+    } catch(e) {
+      responseDiv.textContent = "Error contacting backend: " + e.message;
+      console.error(e);
+    }
+  }
+  
+  // Speak AI answer aloud with speech synthesis
+  function speakAnswer(text) {
+    if(!('speechSynthesis' in window)) return;
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = 'en-US';
+    utter.rate = 1;
+    utter.onstart = () => {
+      if(recognition && isListening) {
+        recognition.abort(); // Stop recognition temporarily during speech
+      }
+    };
+    utter.onend = () => {
+      if(recognition && !isListening) {
+        startRecBtn.disabled = false;
+        stopRecBtn.disabled = true;
+      } else if(recognition && isListening) {
+        recognition.start(); // Restart recognition after AI speech done
+      }
+    };
+    speechSynthesis.speak(utter);
+  }
+</script>
+
+</body>
+</html>
